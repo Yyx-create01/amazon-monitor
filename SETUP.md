@@ -73,6 +73,9 @@ FEISHU_CHAT_ID=oc_xxxxxxxx,oc_yyyyyyyy
 SELLERSPRITE_MCP_URL=https://mcp.sellersprite.com/mcp
 SELLERSPRITE_SECRET_KEY=你的MCP密钥
 
+# GitHub 仓库（用于限流时触发 Actions，格式：用户名/仓库名）
+GITHUB_REPO=你的账号/amazon-monitor
+
 # GitHub Dispatch Token（限流时触发 Actions 用）
 GITHUB_DISPATCH_TOKEN=ghp_xxxxxxxx
 ```

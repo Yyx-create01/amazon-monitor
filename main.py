@@ -863,7 +863,7 @@ def _trigger_github_actions():
         return
     try:
         r = requests.post(
-            "https://api.github.com/repos/Yyx-create01/amazon-monitor/dispatches",
+            f"https://api.github.com/repos/{os.environ.get('GITHUB_REPO', 'Yyx-create01/amazon-monitor')}/dispatches",
             headers={
                 "Authorization": f"token {token}",
                 "Accept": "application/vnd.github.v3+json",
