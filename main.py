@@ -142,6 +142,24 @@ def load_baseline(conn: sqlite3.Connection, asin: str) -> dict | None:
     return dict(zip(cols, row))
 
 
+_baseline_backed_up = False
+
+
+def _backup_baseline(conn: sqlite3.Connection):
+    """Back up baseline.db once per run before any writes."""
+    global _baseline_backed_up
+    if _baseline_backed_up:
+        return
+    try:
+        backup_path = DB_PATH.with_suffix(".db.bak")
+        backup_conn = sqlite3.connect(str(backup_path))
+        conn.backup(backup_conn)
+        backup_conn.close()
+        _baseline_backed_up = True
+    except Exception:
+        pass  # non-critical, don't block the main flow
+
+
 def save_baseline(conn: sqlite3.Connection, data: dict):
     """Save parsed data to baseline. Protects critical fields from being
     overwritten by empty values (e.g. when Amazon rate-limits and the parser
@@ -170,11 +188,15 @@ def save_baseline(conn: sqlite3.Connection, data: dict):
                 v = old_vals[f]  # keep old value
         values.append(v)
     values.append(data["asin"])
+    # Backup baseline before first write of each run
+    _backup_baseline(conn)
     conn.execute(f"UPDATE baseline SET {placeholders} WHERE asin=?", values)
     conn.commit()
+    return True
 
 
 def insert_baseline(conn: sqlite3.Connection, data: dict):
+    _backup_baseline(conn)
     fields = list(data)
     placeholders = ", ".join("?" for _ in fields)
     values = [data[f] for f in fields]
@@ -788,10 +810,12 @@ class SellerSpriteClient:
             "secret-key": self._secret,
             "Accept": "application/json, text/event-stream",
         }
+        self._last_init = 0.0
         self._init_session()
 
     def _init_session(self):
         """Initialize MCP session (required before any tool call)."""
+        self._last_init = time.time()
         try:
             r = requests.post(
                 self._base,
@@ -818,6 +842,9 @@ class SellerSpriteClient:
         """Fetch product detail from SellerSprite. Returns dict with
         nodeLabelPath, subcategories, bsrRank, bsrLabel, etc.
         Returns None on any error."""
+        # Renew session every 30 minutes to avoid silent expiry
+        if time.time() - self._last_init > 1800:
+            self._init_session()
         try:
             r = requests.post(
                 self._base,
@@ -965,6 +992,22 @@ def enrich_from_mcp(current: dict, mcp_detail: dict) -> list[str]:
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
+    # Rotate logs: keep last 7 days, delete older
+    log_file = BASE_DIR / "monitor.log"
+    if log_file.exists():
+        rotated = BASE_DIR / f"monitor_{datetime.now(BJT).strftime('%Y%m%d')}.log"
+        if not rotated.exists():
+            log_file.rename(rotated)
+        # Clean up logs older than 7 days
+        for old_log in sorted(BASE_DIR.glob("monitor_*.log")):
+            try:
+                date_str = old_log.stem.replace("monitor_", "")
+                log_date = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=BJT)
+                if (datetime.now(BJT) - log_date).days > 7:
+                    old_log.unlink()
+            except (ValueError, OSError):
+                pass
+
     print(f"[{datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')}] Starting Amazon product monitor...")
     conn = init_db()
     client = FeishuClient()
@@ -982,6 +1025,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=str, default="", help="Batch N/TOTAL, e.g. 1/3")
     parser.add_argument("--mcp-only", action="store_true", help="Skip static scraping, use MCP for everything")
+    parser.add_argument("--dry-run", action="store_true", help="Test mode: no save, no notification")
     args, _ = parser.parse_known_args()
     batch_num = batch_total = None
     if args.batch and "/" in args.batch:
@@ -1018,6 +1062,7 @@ def main():
     empty_title_streak = 0  # consecutive ASINs with empty title (possible bot check)
     cooldown_count = 0      # how many times we've paused due to rate limiting
     skipped_by_rate_limit = 0  # ASINs not checked because run was aborted
+    empty_data_count = 0       # ASINs with empty scrape (rate-limited)
 
     # Parent ASIN cache — BSR is per-parent, not per-child.
     # After the first child of a parent is processed, all siblings are
@@ -1026,6 +1071,7 @@ def main():
     parent_bsr: dict[str, dict[str, str]] = {}  # parent → {breadcrumb, sales_rank, variations}
     mcp_calls_saved = 0
     mcp_only_mode = args.mcp_only  # manual mode: skip static scrape, use MCP
+    dry_run = args.dry_run        # test mode: no save, no notification
     actions_triggered = False  # whether we've asked GitHub Actions to take over
 
     for i, (asin, _name) in enumerate(shuffled, 1):
@@ -1176,6 +1222,7 @@ def main():
             # Detect potential bot blocking: consecutive empty titles
             if not current["title"]:
                 empty_title_streak += 1
+                empty_data_count += 1
                 print(f"    Empty title (streak={empty_title_streak})")
                 if empty_title_streak >= 3 and not actions_triggered:
                     # Rate-limited — trigger GitHub Actions (US IP)
@@ -1368,16 +1415,24 @@ def main():
             actions_triggered = actions_triggered or saved.get("actions", False)
             batch_file.unlink()
 
-        # 4. Write merged results to Feishu
-    # 4. Send daily summary card
-    sheet_url = f"https://zhangmen365.feishu.cn/sheets/{RESULT_SHEET_TOKEN}?sheet={RESULT_SHEET_ID}"
+        # 5. Write merged results + send summary card
+        if not dry_run:
+            write_result_rows(client, changes_found)
+            print(f"  Wrote {len(changes_found)} changes to result sheet")
+        else:
+            print(f"  [DRY RUN] Would write {len(changes_found)} changes to result sheet")
+
+    if not dry_run:
+        sheet_url = f"https://zhangmen365.feishu.cn/sheets/{RESULT_SHEET_TOKEN}?sheet={RESULT_SHEET_ID}"
 
     checked_count = total - skipped_by_rate_limit
     summary_md_extra = ""
+    if empty_data_count > 0:
+        summary_md_extra = f"\n\n📡 {empty_data_count} 个 ASIN 抓取失败（限流），数据来自MCP缓存。"
     if skipped_by_rate_limit > 0:
         header_color = "red"
         header_title = f"🚫 检查中止{batch_label} — {today_str}"
-        summary_md_extra = f"\n\n---\n🚫 本地被限流，剩余 **{skipped_by_rate_limit}** 个 ASIN 未检查。"
+        summary_md_extra += f"\n\n---\n🚫 本地被限流，剩余 **{skipped_by_rate_limit}** 个 ASIN 未检查。"
         if actions_triggered:
             summary_md_extra += "\nGitHub Actions（US IP）已触发，将接力完成。"
     elif cooldown_count > 0:
@@ -1494,7 +1549,11 @@ def main():
         "elements": elements,
     }
 
-    send_feishu_card(client, card)
+    if not dry_run:
+        send_feishu_card(client, card)
+        print(f"  Summary card sent: {header_title}")
+    else:
+        print(f"  [DRY RUN] Card skipped: {header_title}")
 
     # Clean up batch file after final card
     if batch_num and batch_num == batch_total and batch_file.exists():
