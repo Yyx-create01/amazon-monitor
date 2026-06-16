@@ -4,7 +4,7 @@
 
 每日自动检查 Amazon 产品页面变化，通过飞书通知。支持 10 个维度：标题、价格、促销、五点描述、购物车、Sold By、类目、变体、评分、评论数、销售排名（BSR）。
 
-**运行方式**：Windows 定时任务，每天 6 批分散执行，避免被 Amazon 限流。限流时自动触发 GitHub Actions（US IP）接力。
+**运行方式**：Windows 定时任务，每天 6 批分散执行，避免被 Amazon 限流。完全本地运行，无需服务器或 GitHub。限流时可选的 GitHub Actions 备份（需额外配置）。
 
 ---
 
@@ -12,18 +12,19 @@
 
 - Windows 电脑（24 小时开机或设置自动登录）
 - Python 3.12+
-- GitHub 账号
 - 飞书企业账号（自建应用权限）
 - 卖家精灵（SellerSprite）MCP 密钥
+- （可选）GitHub 账号，用于限流时 US IP 备份
 
 ---
 
 ## 2. 项目部署
 
+将项目文件夹复制到本地任意目录，然后：
+
 ```bash
-# 克隆仓库
-git clone https://github.com/你的账号/amazon-monitor.git
-cd amazon-monitor
+# 进入项目目录
+cd 项目路径\自己ASIN监控
 
 # 创建虚拟环境并安装依赖
 python -m venv .venv
@@ -73,11 +74,9 @@ FEISHU_CHAT_ID=oc_xxxxxxxx,oc_yyyyyyyy
 SELLERSPRITE_MCP_URL=https://mcp.sellersprite.com/mcp
 SELLERSPRITE_SECRET_KEY=你的MCP密钥
 
-# GitHub 仓库（用于限流时触发 Actions，格式：用户名/仓库名）
-GITHUB_REPO=你的账号/amazon-monitor
-
-# GitHub Dispatch Token（限流时触发 Actions 用）
-GITHUB_DISPATCH_TOKEN=ghp_xxxxxxxx
+# 以下可选：限流时自动触发 GitHub Actions（US IP 备份）
+# GITHUB_REPO=你的账号/amazon-monitor
+# GITHUB_DISPATCH_TOKEN=ghp_xxxxxxxx
 ```
 
 ## 4. 卖家精灵 MCP
@@ -103,9 +102,15 @@ for ($i = 0; $i -lt 6; $i++) {
 > **重要**：需要设置 Windows 自动登录（否则定时任务可能因未登录而跳过）。
 > `Win+R` → `netplwiz` → 取消勾选"要使用本计算机，用户必须输入用户名和密码"
 
-## 6. GitHub Actions（备胎）
+## 6. GitHub Actions（可选备胎）
 
-当本地 IP 被 Amazon 限流时，自动触发 GitHub Actions 接力。Actions 使用美国 IP + 内部分批间隔。
+纯本地运行不需要。仅当本地频繁被限流时，可配置 GitHub Actions 用美国 IP 接力。
+
+### 6.0 前置
+
+1. Fork 本项目到你的 GitHub
+2. 仓库 URL 填入 `.env` 的 `GITHUB_REPO`
+3. 创建 GitHub Token 填入 `GITHUB_DISPATCH_TOKEN`
 
 ### 6.1 配置 Secrets
 
