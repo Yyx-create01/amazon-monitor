@@ -41,14 +41,14 @@ FEISHU_CHAT_ID = os.environ["FEISHU_CHAT_ID"]                  # chat_id or "use
 SOURCE_SHEET_ID = os.environ.get("FEISHU_SOURCE_SHEET_ID", "0")  # sheet tab, default "0"
 RESULT_SHEET_ID = os.environ.get("FEISHU_RESULT_SHEET_ID", "0")
 
-# SellerSprite MCP for BSR / category data
+# SellerSprite MCP for BSR / category data — DISABLED (no key)
 SELLERSPRITE_MCP_URL = os.environ.get(
     "SELLERSPRITE_MCP_URL",
     "https://mcp.sellersprite.com/mcp",
 )
 SELLERSPRITE_SECRET_KEY = os.environ.get(
     "SELLERSPRITE_SECRET_KEY",
-    "06594abb126c497aa42ccb9286ec6b66",
+    "",
 )
 
 # Amazon request settings
@@ -842,6 +842,8 @@ class SellerSpriteClient:
         """Fetch product detail from SellerSprite. Returns dict with
         nodeLabelPath, subcategories, bsrRank, bsrLabel, etc.
         Returns None on any error."""
+        if not self._secret:
+            return None  # MCP disabled
         # Renew session every 30 minutes to avoid silent expiry
         if time.time() - self._last_init > 1800:
             self._init_session()
@@ -993,20 +995,23 @@ def enrich_from_mcp(current: dict, mcp_detail: dict) -> list[str]:
 # ── Main ────────────────────────────────────────────────────────────
 def main():
     # Rotate logs: keep last 7 days, delete older
-    log_file = BASE_DIR / "monitor.log"
-    if log_file.exists():
-        rotated = BASE_DIR / f"monitor_{datetime.now(BJT).strftime('%Y%m%d')}.log"
-        if not rotated.exists():
-            log_file.rename(rotated)
-        # Clean up logs older than 7 days
-        for old_log in sorted(BASE_DIR.glob("monitor_*.log")):
-            try:
-                date_str = old_log.stem.replace("monitor_", "")
-                log_date = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=BJT)
-                if (datetime.now(BJT) - log_date).days > 7:
-                    old_log.unlink()
-            except (ValueError, OSError):
-                pass
+    try:
+        log_file = BASE_DIR / "monitor.log"
+        if log_file.exists():
+            rotated = BASE_DIR / f"monitor_{datetime.now(BJT).strftime('%Y%m%d')}.log"
+            if not rotated.exists():
+                log_file.rename(rotated)
+            # Clean up logs older than 7 days
+            for old_log in sorted(BASE_DIR.glob("monitor_*.log")):
+                try:
+                    date_str = old_log.stem.replace("monitor_", "")
+                    log_date = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=BJT)
+                    if (datetime.now(BJT) - log_date).days > 7:
+                        old_log.unlink()
+                except (ValueError, OSError):
+                    pass
+    except OSError:
+        pass  # log file locked by another process, skip rotation
 
     print(f"[{datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')}] Starting Amazon product monitor...")
     conn = init_db()
