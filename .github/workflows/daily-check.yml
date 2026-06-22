@@ -14,16 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
 
-    env:
-      FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
-      FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-      FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
-      FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
-      FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
-      FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-      FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
-      FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -36,21 +26,75 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Batch 1/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 1/6
 
       - name: Batch 2/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 2/6
 
       - name: Batch 3/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 3/6
 
       - name: Batch 4/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 4/6
 
       - name: Batch 5/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 5/6
 
       - name: Batch 6/6
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
         run: python main.py --batch 6/6
 
       - name: Commit updated baseline
