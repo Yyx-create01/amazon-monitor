@@ -5,6 +5,14 @@ import os
 import re
 import sys
 
+# Load .env file if present (for local runs)
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(_env_path)
+except ImportError:
+    pass
+
 # Force UTF-8 output on Windows (avoid GBK encoding errors with CJK/emoji characters)
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -20,20 +28,9 @@ import requests
 from bs4 import BeautifulSoup
 
 # ── Config ──────────────────────────────────────────────────────────
-if getattr(sys, 'frozen', False):
-    # Running as PyInstaller bundle — use exe directory, not temp
-    BASE_DIR = Path(sys.executable).resolve().parent
-else:
-    BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "baseline.db"
 BJT = timezone(timedelta(hours=8))
-
-# Load .env file if present (for local runs)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(BASE_DIR / ".env")
-except ImportError:
-    pass
 
 # Feishu credentials from env
 FEISHU_APP_ID = os.environ["FEISHU_APP_ID"]
@@ -44,7 +41,7 @@ FEISHU_CHAT_ID = os.environ["FEISHU_CHAT_ID"]                  # chat_id or "use
 SOURCE_SHEET_ID = os.environ.get("FEISHU_SOURCE_SHEET_ID", "0")  # sheet tab, default "0"
 RESULT_SHEET_ID = os.environ.get("FEISHU_RESULT_SHEET_ID", "0")
 
-# SellerSprite MCP for BSR / category data
+# SellerSprite MCP for BSR / category data — DISABLED (no key)
 SELLERSPRITE_MCP_URL = os.environ.get(
     "SELLERSPRITE_MCP_URL",
     "https://mcp.sellersprite.com/mcp",
@@ -55,11 +52,7 @@ SELLERSPRITE_SECRET_KEY = os.environ.get(
 )
 
 # Amazon request settings
-# Env overrides (set in .env or CI vars):
-#   REQUEST_DELAY_MIN / REQUEST_DELAY_MAX — per-ASIN delay range (seconds)
-#   BATCH_SIZE  — how many ASINs to process before a long pause (0 = off)
-#   BATCH_PAUSE — how long to pause between batches (seconds)
-#   COOKIE_CLEAR_INTERVAL — clear session cookies every N ASINs
+# Env overrides: REQUEST_DELAY_MIN/MAX, BATCH_SIZE, BATCH_PAUSE, COOKIE_CLEAR_INTERVAL
 _LOCAL_DELAY_MIN = int(os.environ.get("REQUEST_DELAY_MIN", 12))
 _LOCAL_DELAY_MAX = int(os.environ.get("REQUEST_DELAY_MAX", 18))
 _LOCAL_BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 10))
@@ -453,13 +446,7 @@ def parse_product(soup: BeautifulSoup) -> dict:
             result["review_count"] = m.group().replace(",", "")
 
     # 9. Best Sellers Rank
-    # Amazon's BSR appears in the product-details table as a <tr> with
-    # <th>Best Sellers Rank</th> and <td> containing one or more
-    # "#N in Category" entries.  The markup lives inside several possible
-    # containers that vary by page layout (desktop, mobile, old detail page).
-    #
-    # Approach: walk every <th> in the page, find the one whose visible
-    # text is exactly "Best Sellers Rank", then grab its sibling <td>.
+    # Walk <th> elements to find "Best Sellers Rank", then grab its <td>.
     bsr_value = ""
     for th in soup.find_all("th"):
         if not th.get_text(strip=True):
@@ -469,7 +456,6 @@ def parse_product(soup: BeautifulSoup) -> dict:
             if td:
                 bsr_value = td.get_text(" ", strip=True)
             else:
-                # Sometimes the <th> is inside a <tr> — grab the next <td> in the row
                 tr = th.find_parent("tr")
                 if tr:
                     row_td = tr.find("td")
@@ -478,67 +464,37 @@ def parse_product(soup: BeautifulSoup) -> dict:
             if bsr_value:
                 break
 
-    # Fallback 1: legacy <li id="SalesRank"> element (old Amazon layout)
+    # Fallback 1: legacy <li id="SalesRank">
     if not bsr_value:
         legacy_el = soup.select_one("#SalesRank")
         if legacy_el:
             bsr_value = legacy_el.get_text(strip=True)
 
-    # Fallback 2: search the entire page text for the "Best Sellers Rank"
-    # label and extract whatever ranks follow it.  This catches layouts
-    # where the data is inside a <span>, a plain <div>, or a deeply-nested
-    # accessibility-only element.
+    # Fallback 2: full-page text search
     if not bsr_value:
-        # Use a string-search that works across element boundaries.
         bsr_node = soup.find(string=re.compile(r"Best\s+Sellers?\s+Rank", re.I))
         if bsr_node:
-            # Walk up to a container that holds the rank values too.
             container = bsr_node.find_parent()
-            for _ in range(4):  # try up to 4 levels up
+            for _ in range(4):
                 if container is None:
                     break
-                text = container.get_text(strip=True)
-                if re.search(r"#[\d,]+", text):
+                if re.search(r"#[\d,]+", container.get_text(strip=True)):
                     break
                 container = container.find_parent()
             if container:
                 bsr_value = container.get_text(strip=True)
 
-    # Normalise the raw text into a clean pipe-separated list of
-    # "#N in Category" segments.  Discard the label and any trailing
-    # noise (ASIN, "See Top 100", etc.).
+    # Normalize: extract "#N in Category" segments
     if bsr_value:
-        # Strip the label prefix (e.g. "Best Sellers Rank" or
-        # "Best Sellers Rank:") and any leading whitespace
         cleaned = re.sub(r"^.*?Best\s+Sellers?\s+Rank\s*:?\s*", "", bsr_value, flags=re.I)
-        # Remove "(See Top 100 …)" parentheticals — they are links, not data.
-        # Whitespace inside the parens varies depending on how get_text()
-        # joins child elements, so we use \s* generously.
         cleaned = re.sub(r"\s*\(\s*See\s+Top\s+\d+[^)]*\)", "", cleaned, flags=re.I)
-        # Remove trailing ASIN / extra whitespace / noise
         cleaned = re.sub(r"\s*ASIN\s*.*$", "", cleaned, flags=re.I)
         cleaned = cleaned.strip()
-
-        # Each BSR entry starts with "#<number>".  Split on every
-        # occurrence of "#" that isn't the very first character and
-        # re-prefix so each segment is a self-contained "#N in Category".
-        raw_parts = re.split(r"\s*(?=#[\d,]+)", cleaned)
-        segments = []
-        for p in raw_parts:
-            p = p.strip()
-            if not p:
-                continue
-            # A valid segment must start with "#<digits>" and contain "in"
-            if re.match(r"#[\d,]+\s+in\s+", p):
-                segments.append(p)
-            elif re.match(r"#[\d,]+", p):
-                # "#N" without "in …" → likely truncated; keep anyway
-                segments.append(p)
-
-        if segments:
-            result["sales_rank"] = " | ".join(segments)
+        segments = [s.strip() for s in re.split(r"\s*(?=#[\d,]+)", cleaned) if s.strip()]
+        ranks = [s for s in segments if re.match(r"#[\d,]+", s)]
+        if ranks:
+            result["sales_rank"] = " | ".join(ranks)
         else:
-            # Fallback: keep whatever remains after the label, trimmed
             result["sales_rank"] = cleaned
 
     return result
@@ -578,10 +534,6 @@ def compare(current: dict, baseline: dict | None) -> list[str]:
     for f in text_fields:
         old_val = normalize_text(baseline.get(f))
         new_val = normalize_text(current.get(f))
-        if f == "breadcrumb":
-            # Normalize separators — MCP uses ":" while page scraping uses ">"
-            old_val = old_val.replace(":", " > ").replace("  ", " ")
-            new_val = new_val.replace(":", " > ").replace("  ", " ")
         if old_val and new_val and old_val != new_val:
             changes.append(f)
 
@@ -682,11 +634,7 @@ def format_change_detail(field: str, old_data: dict, new_data: dict) -> str:
     label = field_labels.get(field, f"{field} 变化")
     old_val = str(old_data.get(field, "") or "").strip()
     new_val = str(new_data.get(field, "") or "").strip()
-    # For breadcrumb, show current value even if long
-    if field == "breadcrumb":
-        short = new_val if len(new_val) <= 60 else new_val[-60:]
-        return f"类目变化: {short}"
-    # Truncate long values for other fields
+    # Truncate long values for message
     if len(old_val) > 50 or len(new_val) > 50:
         return f"{label}"
     return f"{label}: {old_val} → {new_val}"
@@ -1315,15 +1263,12 @@ def main():
                 empty_data_count += 1
                 print(f"    Empty title (streak={empty_title_streak})")
                 if empty_title_streak >= 8:
-                    # Rate-limited — take a long pause to let the block cool
-                    # down, then reset streak and keep going.
                     cooldown_count += 1
-                    cooldown_sec = min(300 * cooldown_count, 1800)  # 5→10→15→… max 30 min
-                    print(f"  [COOLDOWN] {empty_title_streak} consecutive empties. "
+                    cooldown_sec = min(300 * cooldown_count, 1800)
+                    print(f"  [COOLDOWN] {empty_title_streak} empties. "
                           f"Pausing {cooldown_sec}s (cooldown #{cooldown_count})...")
                     time.sleep(cooldown_sec)
                     empty_title_streak = 0
-                    # Fire GitHub Actions as backup if haven't already
                     if not actions_triggered:
                         _trigger_github_actions()
                         actions_triggered = True
@@ -1373,7 +1318,7 @@ def main():
                             if child_asin:
                                 asin_to_parent[child_asin] = parent
                 else:
-                    pass  # MCP unavailable, using static scrape only
+                    print(f"    MCP: unavailable, falling back to static scrape")
 
         # ── Baseline logic (shared by Path A + Path C) ──────────────
         baseline = load_baseline(conn, asin)
@@ -1514,32 +1459,22 @@ def main():
         else:
             print(f"  [DRY RUN] Would write {len(changes_found)} changes to result sheet")
 
-    feishu_tenant = os.environ.get("FEISHU_TENANT", "open")
-    sheet_url = f"https://{feishu_tenant}.feishu.cn/sheets/{RESULT_SHEET_TOKEN}?sheet={RESULT_SHEET_ID}"
+    if not dry_run:
+        sheet_url = f"https://zhangmen365.feishu.cn/sheets/{RESULT_SHEET_TOKEN}?sheet={RESULT_SHEET_ID}"
 
     checked_count = total - skipped_by_rate_limit
-    fail_rate = empty_data_count / max(total, 1) if total > 0 else 0
     summary_md_extra = ""
-
+    if empty_data_count > 0:
+        summary_md_extra = f"\n\n📡 {empty_data_count} 个 ASIN 抓取失败（限流），数据来自MCP缓存。"
     if skipped_by_rate_limit > 0:
         header_color = "red"
         header_title = f"🚫 检查中止{batch_label} — {today_str}"
         summary_md_extra += f"\n\n---\n🚫 本地被限流，剩余 **{skipped_by_rate_limit}** 个 ASIN 未检查。"
         if actions_triggered:
             summary_md_extra += "\nGitHub Actions（US IP）已触发，将接力完成。"
-    elif fail_rate >= 0.5:  # 50%+ empty → likely IP blocked
-        header_color = "red"
-        header_title = f"🚫 大面积抓取失败 | {today_str}"
-        summary_md_extra = f"\n\n📡 **{empty_data_count}/{total}** 个 ASIN 抓取失败，可能 IP 被亚马逊限制。"
-    elif fail_rate > 0.1:  # 10-50% empty → warning
-        header_color = "orange"
-        header_title = f"⚠️ 部分抓取失败 | {today_str}"
-        summary_md_extra = f"\n\n📡 {empty_data_count} 个 ASIN 抓取失败。"
     elif cooldown_count > 0:
         header_color = "orange"
-        header_title = f"⚠️ 检查完成（{cooldown_count}次限流冷却）| {today_str}"
-        if empty_data_count > 0:
-            summary_md_extra += f"\n\n🔄 触发 {cooldown_count} 次冷却重试，{empty_data_count} 个 ASIN 抓取为空。"
+        header_title = f"⚠️ 检查完成（有限流波动）| {today_str}"
     elif asin_changes:
         header_color = "orange"
         header_title = f"⚠️ 每日检查完成 | {today_str}"
