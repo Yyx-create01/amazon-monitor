@@ -1,0 +1,25 @@
+name: Test Single Run
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run monitor (no batch)
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_SOURCE_SHEET_TOKEN: ${{ secrets.FEISHU_SOURCE_SHEET_TOKEN }}
+          FEISHU_RESULT_SHEET_TOKEN: ${{ secrets.FEISHU_RESULT_SHEET_TOKEN }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_SOURCE_SHEET_ID: ${{ secrets.FEISHU_SOURCE_SHEET_ID }}
+          FEISHU_RESULT_SHEET_ID: ${{ secrets.FEISHU_RESULT_SHEET_ID }}
+        run: python main.py
