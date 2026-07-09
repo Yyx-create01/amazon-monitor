@@ -1,0 +1,45 @@
+name: Amazon Daily Monitor
+
+on:
+  schedule:
+    # 2:00 AM Beijing = 18:00 UTC (previous day)
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch N/TOTAL (e.g. 1/3)'
+        required: false
+        default: ''
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run monitor
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TENANT: ${{ secrets.FEISHU_TENANT }}
+          FEISHU_APP_TOKEN: ${{ secrets.FEISHU_APP_TOKEN }}
+          FEISHU_SOURCE_TABLE_ID: ${{ secrets.FEISHU_SOURCE_TABLE_ID }}
+          FEISHU_RESULT_TABLE_ID: ${{ secrets.FEISHU_RESULT_TABLE_ID }}
+          FEISHU_BASELINE_TABLE_ID: ${{ secrets.FEISHU_BASELINE_TABLE_ID }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          # No CF_PROXY — Actions runs from US IP so direct access works
+          REQUEST_DELAY_MIN: ${{ vars.REQUEST_DELAY_MIN || '5' }}
+          REQUEST_DELAY_MAX: ${{ vars.REQUEST_DELAY_MAX || '10' }}
+          BATCH_SIZE: ${{ vars.BATCH_SIZE || '20' }}
+          BATCH_PAUSE: ${{ vars.BATCH_PAUSE || '60' }}
+        run: |
+          python main_actions.py ${{ github.event.inputs.batch }}
