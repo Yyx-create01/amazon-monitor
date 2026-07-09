@@ -384,6 +384,95 @@ def send_card(client, card):
         body = {"receive_id": cid, "msg_type": "interactive", "content": json.dumps(card)}
         client._req("POST", "/open-apis/im/v1/messages?receive_id_type=chat_id", body)
 
+# ── Baseline persistence (Bitable ↔ SQLite) ─────────────────────────
+BASELINE_FIELD_MAP = {
+    "asin": "ASIN", "title": "标题", "price_raw": "价格",
+    "is_promo": "促销状态", "bullet_points": "五点描述",
+    "add_to_cart": "购物车", "sold_by": "Sold By",
+    "breadcrumb": "类目节点", "variations": "变体关系",
+    "rating": "评分", "review_count": "评论数",
+    "sales_rank": "销售排名", "updated_at": "更新时间",
+}
+BASELINE_FIELDS_SQL = list(BASELINE_FIELD_MAP.keys())
+BASELINE_BITABLE_FIELDS = {v: k for k, v in BASELINE_FIELD_MAP.items()}
+
+def pull_baseline_from_bitable(client, conn):
+    """Load baseline from Bitable into local SQLite at startup."""
+    base = f"/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_BASELINE_TABLE_ID}/records"
+    page_token = None
+    count = 0
+    while True:
+        path = base + "?page_size=500"
+        if page_token: path += f"&page_token={page_token}"
+        data = client._req("GET", path)
+        if not data: break
+        for rec in data.get("data",{}).get("items",[]):
+            fields = rec.get("fields", {})
+            asin = str(fields.get("ASIN","")).strip()
+            if not re.match(r"^B[A-Z0-9]{9}$", asin): continue
+            row = {"asin": asin}
+            for bt_field, sql_field in BASELINE_BITABLE_FIELDS.items():
+                if sql_field == "asin": continue
+                val = fields.get(bt_field, "")
+                if val is not None: val = str(val).strip()[:500]
+                else: val = ""
+                row[sql_field] = val
+            existing = conn.execute("SELECT asin FROM baseline WHERE asin=?", (asin,)).fetchone()
+            if not existing:
+                conn.execute(
+                    f"INSERT INTO baseline ({', '.join(row.keys())}) VALUES ({', '.join('?' for _ in row)})",
+                    list(row.values()))
+                count += 1
+            else:
+                # Update non-empty fields
+                for k, v in row.items():
+                    if k != "asin" and v:
+                        conn.execute(f"UPDATE baseline SET {k}=? WHERE asin=?", (v, asin))
+        if not data.get("data",{}).get("has_more"): break
+        page_token = data.get("data",{}).get("page_token","")
+        if not page_token: break
+    conn.commit()
+    print(f"  Pulled {count} new baselines from Bitable")
+
+def push_baseline_to_bitable(client, conn):
+    """Sync local SQLite baseline to Bitable (delete all, then batch create)."""
+    rows = conn.execute("SELECT * FROM baseline").fetchall()
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(baseline)")]
+    if not rows: return
+
+    # Delete all existing records
+    base = f"/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_BASELINE_TABLE_ID}/records"
+    all_ids = []
+    page_token = None
+    while True:
+        path = base + "?page_size=500"
+        if page_token: path += f"&page_token={page_token}"
+        data = client._req("GET", path)
+        if not data: break
+        for item in data.get("data",{}).get("items",[]):
+            if item.get("record_id"): all_ids.append(item["record_id"])
+        if not data.get("data",{}).get("has_more"): break
+        page_token = data.get("data",{}).get("page_token","")
+    if all_ids:
+        for i in range(0, len(all_ids), 500):
+            client._req("POST", f"{base}/batch_delete", {"records": all_ids[i:i+500]})
+
+    # Batch create from SQLite
+    records = []
+    for row in rows:
+        row_dict = dict(zip(cols, row))
+        fields = {}
+        for sql_col, bt_field in BASELINE_FIELD_MAP.items():
+            val = row_dict.get(sql_col, "")
+            if val is not None: val = str(val).strip()[:500]
+            else: val = ""
+            fields[bt_field] = val
+        records.append({"fields": fields})
+
+    for i in range(0, len(records), 500):
+        client._req("POST", f"{base}/batch_create", {"records": records[i:i+500]})
+    print(f"  Pushed {len(records)} baselines to Bitable")
+
 # ── Main ────────────────────────────────────────────────────────────
 def main():
     print(f"[{datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')}] Starting (Actions)...")
@@ -393,6 +482,7 @@ def main():
 
     asins = read_asin_list(client)
     print(f"  Read {len(asins)} ASINs")
+    pull_baseline_from_bitable(client, conn)
 
     import argparse
     parser = argparse.ArgumentParser()
@@ -488,6 +578,7 @@ def main():
     send_card(client, card)
     print(f"  Card sent: {title}")
 
+    push_baseline_to_bitable(client, conn)
     conn.close()
     print(f"[{datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')}] Done.")
 
