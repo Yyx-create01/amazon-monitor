@@ -37,9 +37,9 @@ jobs:
           FEISHU_BASELINE_TABLE_ID: ${{ secrets.FEISHU_BASELINE_TABLE_ID }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
           # No CF_PROXY — Actions runs from US IP so direct access works
-          REQUEST_DELAY_MIN: ${{ vars.REQUEST_DELAY_MIN || '5' }}
-          REQUEST_DELAY_MAX: ${{ vars.REQUEST_DELAY_MAX || '10' }}
-          BATCH_SIZE: ${{ vars.BATCH_SIZE || '20' }}
-          BATCH_PAUSE: ${{ vars.BATCH_PAUSE || '60' }}
+          REQUEST_DELAY_MIN: ${{ vars.REQUEST_DELAY_MIN || '20' }}
+          REQUEST_DELAY_MAX: ${{ vars.REQUEST_DELAY_MAX || '35' }}
+          BATCH_SIZE: ${{ vars.BATCH_SIZE || '12' }}
+          BATCH_PAUSE: ${{ vars.BATCH_PAUSE || '180' }}
         run: |
           python main_actions.py ${{ github.event.inputs.batch }}
