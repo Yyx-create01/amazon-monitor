@@ -487,6 +487,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=str, default="")
+    parser.add_argument("--limit", type=int, default=0)
     args, _ = parser.parse_known_args()
     batch_num = batch_total = None
     if args.batch and "/" in args.batch:
@@ -499,11 +500,17 @@ def main():
         shuffled = shuffled[s:e]
         print(f"  Batch {batch_num}/{batch_total}: {len(shuffled)} ASINs")
 
+    if args.limit > 0:
+        shuffled = shuffled[:args.limit]
+        print(f"  Limit mode: {len(shuffled)} ASINs")
+
     total = len(shuffled)
     changes_found = []
     asin_changes = {}
     field_groups = {}
     empty_streak = 0; cooldown_count = 0
+    failed_asins = set()
+    valid_count = 0
 
     for i, (asin, _) in enumerate(shuffled, 1):
         print(f"  [{i}/{total}] {asin}...")
@@ -511,6 +518,7 @@ def main():
 
         if soup is None:
             print("    SKIP: fetch failed")
+            failed_asins.add(asin)
             continue
 
         if redirected and not (soup.select_one("#productTitle") or soup.select_one("#title")):
@@ -521,6 +529,7 @@ def main():
             current = parse_product(soup)
 
         if not current.get("title",""):
+            failed_asins.add(asin)
             empty_streak += 1
             if empty_streak >= 8:
                 cooldown_count += 1
@@ -531,6 +540,7 @@ def main():
             continue
         else:
             empty_streak = 0
+            valid_count += 1
 
         baseline = load_baseline(conn, asin)
         if baseline is None:
@@ -564,12 +574,16 @@ def main():
 
     sheet_url = f"https://{FEISHU_TENANT}.feishu.cn/base/{FEISHU_APP_TOKEN}?table={FEISHU_RESULT_TABLE_ID}"
 
-    if asin_changes:
+    if failed_asins:
+        color, title = "red", f"🚫 检查存在失败 | {today_str}"
+        summary = (f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n"
+                   f"❌ **{len(failed_asins)}** 个 ASIN 抓取失败，Baseline 未被失败数据覆盖")
+    elif asin_changes:
         color, title = "orange", f"⚠️ 每日检查完成 | {today_str}"
-        summary = f"共检查 **{total}** 个 ASIN\n\n发现 **{len(asin_changes)}** 个 ASIN 有变化"
+        summary = f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n发现 **{len(asin_changes)}** 个 ASIN 有变化"
     else:
         color, title = "green", f"✅ 每日检查完成 | {today_str}"
-        summary = f"共检查 **{total}** 个 ASIN\n\n全部无异常"
+        summary = f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n全部无异常"
 
     elements = [{"tag":"div","text":{"tag":"lark_md","content":summary}},
                 {"tag":"hr"},
@@ -578,7 +592,10 @@ def main():
     send_card(client, card)
     print(f"  Card sent: {title}")
 
-    push_baseline_to_bitable(client, conn)
+    if valid_count > 0:
+        push_baseline_to_bitable(client, conn)
+    else:
+        print("  [WARN] Baseline push skipped: no valid product data")
     conn.close()
     print(f"[{datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')}] Done.")
 

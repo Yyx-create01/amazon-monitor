@@ -2,14 +2,18 @@ name: Amazon Daily Monitor
 
 on:
   schedule:
-    # 2:00 AM Beijing = 18:00 UTC (previous day)
-    - cron: '0 18 * * *'
+    # 06:00 Beijing = 22:00 UTC (previous day)
+    - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
-      batch:
-        description: 'Batch N/TOTAL (e.g. 1/3)'
+      limit:
+        description: 'Smoke-test ASIN count (e.g. 3); blank means all'
         required: false
         default: ''
+
+concurrency:
+  group: amazon-asin-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
@@ -37,9 +41,13 @@ jobs:
           FEISHU_BASELINE_TABLE_ID: ${{ secrets.FEISHU_BASELINE_TABLE_ID }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
           # No CF_PROXY — Actions runs from US IP so direct access works
-          REQUEST_DELAY_MIN: ${{ vars.REQUEST_DELAY_MIN || '20' }}
-          REQUEST_DELAY_MAX: ${{ vars.REQUEST_DELAY_MAX || '35' }}
-          BATCH_SIZE: ${{ vars.BATCH_SIZE || '12' }}
-          BATCH_PAUSE: ${{ vars.BATCH_PAUSE || '180' }}
+          REQUEST_DELAY_MIN: ${{ vars.REQUEST_DELAY_MIN || '4' }}
+          REQUEST_DELAY_MAX: ${{ vars.REQUEST_DELAY_MAX || '7' }}
+          BATCH_SIZE: ${{ vars.BATCH_SIZE || '20' }}
+          BATCH_PAUSE: ${{ vars.BATCH_PAUSE || '30' }}
         run: |
-          python main_actions.py ${{ github.event.inputs.batch }}
+          if [ -n "${{ inputs.limit }}" ]; then
+            python main_actions.py --limit "${{ inputs.limit }}"
+          else
+            python main_actions.py
+          fi

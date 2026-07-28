@@ -6,3 +6,11 @@ node_modules/
 package-lock.json
 package.json
 *.zip
+baseline.db
+baseline.db.bak
+monitor*.log
+batch_results_*.json
+build/
+dist/
+.venv/
+.gstack/
