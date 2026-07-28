@@ -91,23 +91,36 @@ def normalize_text(val):
 
 # ── Scraper ─────────────────────────────────────────────────────────
 def fetch_page(asin, session):
-    url = AMAZON_BASE + asin
-    headers = {**HEADERS_TMPL, "User-Agent": random.choice(USER_AGENTS)}
-    for attempt in range(3):
+    strategies = [
+        (AMAZON_BASE + asin, random.choice(USER_AGENTS)),
+        (f"https://www.amazon.com/gp/aw/d/{asin}",
+         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"),
+        (f"{AMAZON_BASE}{asin}?th=1&psc=1", random.choice(USER_AGENTS)),
+        (f"{AMAZON_BASE}{asin}?language=en_US&currency=USD", random.choice(USER_AGENTS)),
+    ]
+    for attempt, (url, user_agent) in enumerate(strategies):
+        headers = {
+            **HEADERS_TMPL,
+            "User-Agent": user_agent,
+            "Cache-Control": "no-cache",
+            "Cookie": "lc-main=en_US; i18n-prefs=USD",
+        }
         try:
-            resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
+            # Clear challenge/session cookies before switching strategy.
+            session.cookies.clear()
+            resp = session.get(url, headers=headers, timeout=25, allow_redirects=True)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "lxml")
-                # CAPTCHA check
                 if soup.select_one("form[action='/errors/validateCaptcha']"):
-                    time.sleep(5 * (attempt + 1))
+                    print(f"    attempt {attempt+1}: CAPTCHA")
+                    time.sleep(4 * (attempt + 1))
                     continue
                 redirected = asin not in resp.url
                 return soup, redirected
-            if resp.status_code in (429, 503):
-                time.sleep(5 * (attempt + 1))
-                continue
-        except requests.RequestException:
+            print(f"    attempt {attempt+1}: HTTP {resp.status_code}")
+            time.sleep(4 * (attempt + 1))
+        except requests.RequestException as e:
+            print(f"    attempt {attempt+1}: {type(e).__name__}")
             time.sleep(3 * (attempt + 1))
             continue
     return None, False
@@ -372,17 +385,21 @@ def write_results(client, rows, asin_info=None):
         records.append({"fields": {
             "日期": now_ts, "ASIN": r["asin"], "品名": info.get("name",""),
             "产品线": info.get("product_line",""), "变化字段": r["field"],
-            "旧值": r["old_value"], "新值": r["new_value"], "检查时间": now_ts,
+            "旧值": r["old_value"], "新值": r["new_value"],
+            "检查时间": datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S"),
         }})
     for i in range(0, len(records), 500):
         chunk = records[i:i+500]
         client._req("POST", f"/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_RESULT_TABLE_ID}/records/batch_create", {"records": chunk})
 
 def send_card(client, card):
+    all_sent = True
     for cid in FEISHU_CHAT_ID.split(","):
         cid = cid.strip()
         body = {"receive_id": cid, "msg_type": "interactive", "content": json.dumps(card)}
-        client._req("POST", "/open-apis/im/v1/messages?receive_id_type=chat_id", body)
+        if client._req("POST", "/open-apis/im/v1/messages?receive_id_type=chat_id", body) is None:
+            all_sent = False
+    return all_sent
 
 # ── Baseline persistence (Bitable ↔ SQLite) ─────────────────────────
 BASELINE_FIELD_MAP = {
@@ -589,8 +606,10 @@ def main():
                 {"tag":"hr"},
                 {"tag":"action","actions":[{"tag":"button","text":{"tag":"plain_text","content":"查看飞书表格"},"type":"primary","url":sheet_url}]}]
     card = {"config":{"wide_screen_mode":True},"header":{"title":{"tag":"plain_text","content":title},"template":color},"elements":elements}
-    send_card(client, card)
-    print(f"  Card sent: {title}")
+    if send_card(client, card):
+        print(f"  Card sent: {title}")
+    else:
+        print("  [ERROR] Card not sent: add the app bot to FEISHU_CHAT_ID chat")
 
     if valid_count > 0:
         push_baseline_to_bitable(client, conn)
