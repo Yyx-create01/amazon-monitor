@@ -434,13 +434,11 @@ def _format_card_change(field, old_value, new_value):
         if not changed_items:
             return f"  - **{label}**：内容或顺序发生变化"
         lines = []
-        for number, old_item, new_item in changed_items[:2]:
+        for number, old_item, new_item in changed_items:
             lines.append(
                 f"  - **五点第{number}条**：{_card_text(old_item, 75)}"
                 f" → {_card_text(new_item, 75)}"
             )
-        if len(changed_items) > 2:
-            lines.append(f"  - 另有 **{len(changed_items) - 2}** 条五点发生变化")
         return "\n".join(lines)
 
     if field == "title":
@@ -455,21 +453,21 @@ def _format_card_change(field, old_value, new_value):
     )
 
 
-def build_summary_card_text(total, valid_count, failed_asins, changes_found, asin_info):
+def build_summary_card_pages(total, valid_count, failed_asins, changes_found, asin_info):
+    """Return enough size-safe card pages to show every changed ASIN."""
     changed_by_asin = {}
     for row in changes_found:
         changed_by_asin.setdefault(row["asin"], []).append(row)
 
-    lines = [
+    intro = [
         f"有效检查 **{valid_count}**/{total} 个 ASIN",
         f"发现 **{len(changed_by_asin)}** 个 ASIN、**{len(changes_found)}** 项变化",
     ]
+    pages = []
+    max_chars = 18000
 
     if changed_by_asin:
-        lines.extend(["", "📌 **变化明细**"])
-        displayed = 0
-        max_asins = 30
-        max_chars = 22000
+        lines = intro + ["", "📌 **变化明细**"]
         for asin in sorted(changed_by_asin):
             info = asin_info.get(asin, {})
             name = _card_text(info.get("name", ""), 40)
@@ -479,30 +477,27 @@ def build_summary_card_text(total, valid_count, failed_asins, changes_found, asi
                     row.get("field_key", ""), row.get("old_value", ""), row.get("new_value", "")
                 ))
             block_text = "\n".join(block)
-            if displayed >= max_asins or len("\n".join(lines)) + len(block_text) > max_chars:
-                break
+            if len("\n".join(lines)) + len(block_text) > max_chars and len(lines) > 2:
+                pages.append("\n".join(lines))
+                lines = ["📌 **变化明细（续）**"]
             lines.append(block_text)
-            displayed += 1
-
-        remaining = len(changed_by_asin) - displayed
-        if remaining > 0:
-            lines.extend([
-                "",
-                f"……其余 **{remaining}** 个变化 ASIN 请点击下方按钮查看飞书变化日志。",
-            ])
+        pages.append("\n".join(lines))
     else:
-        lines.extend(["", "全部无异常"])
+        pages = ["\n".join(intro + ["", "全部无异常"])]
 
     if failed_asins:
         failed_list = sorted(failed_asins)
-        preview = "、".join(failed_list[:15])
-        lines.extend([
+        failure_block = "\n".join([
             "",
             f"❌ **{len(failed_list)}** 个 ASIN 抓取失败，原 Baseline 已保留：",
-            preview + (f" 等其余{len(failed_list)-15}个" if len(failed_list) > 15 else ""),
+            "、".join(failed_list),
         ])
+        if len(pages[-1]) + len(failure_block) > max_chars:
+            pages.append(failure_block.strip())
+        else:
+            pages[-1] += failure_block
 
-    return "\n".join(lines)
+    return pages
 
 # ── Baseline persistence (Bitable ↔ SQLite) ─────────────────────────
 BASELINE_FIELD_MAP = {
@@ -705,18 +700,25 @@ def main():
     else:
         color, title = "green", f"✅ 每日检查完成 | {today_str}"
 
-    summary = build_summary_card_text(
+    summary_pages = build_summary_card_pages(
         total, valid_count, failed_asins, changes_found, asins
     )
-
-    elements = [{"tag":"div","text":{"tag":"lark_md","content":summary}},
-                {"tag":"hr"},
-                {"tag":"action","actions":[{"tag":"button","text":{"tag":"plain_text","content":"查看飞书表格"},"type":"primary","url":sheet_url}]}]
-    card = {"config":{"wide_screen_mode":True},"header":{"title":{"tag":"plain_text","content":title},"template":color},"elements":elements}
-    if send_card(client, card):
-        print(f"  Card sent: {title}")
+    all_cards_sent = True
+    page_total = len(summary_pages)
+    for page_number, summary in enumerate(summary_pages, 1):
+        page_title = title if page_total == 1 else f"{title}（{page_number}/{page_total}）"
+        elements = [{"tag":"div","text":{"tag":"lark_md","content":summary}},
+                    {"tag":"hr"},
+                    {"tag":"action","actions":[{"tag":"button","text":{"tag":"plain_text","content":"查看飞书表格"},"type":"primary","url":sheet_url}]}]
+        card = {"config":{"wide_screen_mode":True},"header":{"title":{"tag":"plain_text","content":page_title},"template":color},"elements":elements}
+        if not send_card(client, card):
+            all_cards_sent = False
+        if page_number < page_total:
+            time.sleep(1)
+    if all_cards_sent:
+        print(f"  Cards sent: {page_total} page(s), all changes included")
     else:
-        print("  [ERROR] Card not sent: add the app bot to FEISHU_CHAT_ID chat")
+        print("  [ERROR] One or more cards were not sent")
 
     if valid_count > 0:
         push_baseline_to_bitable(client, conn)
