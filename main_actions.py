@@ -401,6 +401,109 @@ def send_card(client, card):
             all_sent = False
     return all_sent
 
+
+def _card_text(value, limit=110):
+    """Compact, single-line, Lark-card-safe text."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = text.replace("`", "'").replace("<", "‹").replace(">", "›")
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + "…"
+    return text or "（空）"
+
+
+def _split_bullets(value):
+    text = str(value or "")
+    if "||" in text:
+        return [x.strip() for x in text.split("||") if x.strip()]
+    return [text.strip()] if text.strip() else []
+
+
+def _format_card_change(field, old_value, new_value):
+    """Describe exactly what changed without flooding the card."""
+    label = FIELD_LABELS.get(field, field)
+    if field == "bullet_points":
+        old_items = _split_bullets(old_value)
+        new_items = _split_bullets(new_value)
+        count = max(len(old_items), len(new_items))
+        changed_items = []
+        for i in range(count):
+            old_item = old_items[i] if i < len(old_items) else ""
+            new_item = new_items[i] if i < len(new_items) else ""
+            if normalize_text(old_item) != normalize_text(new_item):
+                changed_items.append((i + 1, old_item, new_item))
+        if not changed_items:
+            return f"  - **{label}**：内容或顺序发生变化"
+        lines = []
+        for number, old_item, new_item in changed_items[:2]:
+            lines.append(
+                f"  - **五点第{number}条**：{_card_text(old_item, 75)}"
+                f" → {_card_text(new_item, 75)}"
+            )
+        if len(changed_items) > 2:
+            lines.append(f"  - 另有 **{len(changed_items) - 2}** 条五点发生变化")
+        return "\n".join(lines)
+
+    if field == "title":
+        return (
+            f"  - **{label}**：{_card_text(old_value, 100)}"
+            f" → {_card_text(new_value, 100)}"
+        )
+
+    return (
+        f"  - **{label}**：{_card_text(old_value, 70)}"
+        f" → {_card_text(new_value, 70)}"
+    )
+
+
+def build_summary_card_text(total, valid_count, failed_asins, changes_found, asin_info):
+    changed_by_asin = {}
+    for row in changes_found:
+        changed_by_asin.setdefault(row["asin"], []).append(row)
+
+    lines = [
+        f"有效检查 **{valid_count}**/{total} 个 ASIN",
+        f"发现 **{len(changed_by_asin)}** 个 ASIN、**{len(changes_found)}** 项变化",
+    ]
+
+    if changed_by_asin:
+        lines.extend(["", "📌 **变化明细**"])
+        displayed = 0
+        max_asins = 30
+        max_chars = 22000
+        for asin in sorted(changed_by_asin):
+            info = asin_info.get(asin, {})
+            name = _card_text(info.get("name", ""), 40)
+            block = [f"\n**{asin}（{name}）**"]
+            for row in changed_by_asin[asin]:
+                block.append(row.get("card_detail") or _format_card_change(
+                    row.get("field_key", ""), row.get("old_value", ""), row.get("new_value", "")
+                ))
+            block_text = "\n".join(block)
+            if displayed >= max_asins or len("\n".join(lines)) + len(block_text) > max_chars:
+                break
+            lines.append(block_text)
+            displayed += 1
+
+        remaining = len(changed_by_asin) - displayed
+        if remaining > 0:
+            lines.extend([
+                "",
+                f"……其余 **{remaining}** 个变化 ASIN 请点击下方按钮查看飞书变化日志。",
+            ])
+    else:
+        lines.extend(["", "全部无异常"])
+
+    if failed_asins:
+        failed_list = sorted(failed_asins)
+        preview = "、".join(failed_list[:15])
+        lines.extend([
+            "",
+            f"❌ **{len(failed_list)}** 个 ASIN 抓取失败，原 Baseline 已保留：",
+            preview + (f" 等其余{len(failed_list)-15}个" if len(failed_list) > 15 else ""),
+        ])
+
+    return "\n".join(lines)
+
 # ── Baseline persistence (Bitable ↔ SQLite) ─────────────────────────
 BASELINE_FIELD_MAP = {
     "asin": "ASIN", "title": "标题", "price_raw": "价格",
@@ -573,7 +676,11 @@ def main():
                     print(f"    CHANGE: {detail[:100]}")
                     changes_found.append({"asin":asin,"field":FIELD_LABELS.get(f,f),
                         "old_value":str(baseline.get(f,"")).strip()[:200],
-                        "new_value":str(current.get(f,"")).strip()[:200]})
+                        "new_value":str(current.get(f,"")).strip()[:200],
+                        "field_key":f,
+                        "card_detail":_format_card_change(
+                            f, baseline.get(f,""), current.get(f,"")
+                        )})
                     field_groups.setdefault(f,[]).append({"asin":asin,"detail":detail})
                     asin_changes.setdefault(asin,[]).append(detail)
             save_baseline(conn, {**current, "asin":asin, "updated_at":datetime.now(BJT).isoformat()})
@@ -593,14 +700,14 @@ def main():
 
     if failed_asins:
         color, title = "red", f"🚫 检查存在失败 | {today_str}"
-        summary = (f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n"
-                   f"❌ **{len(failed_asins)}** 个 ASIN 抓取失败，Baseline 未被失败数据覆盖")
     elif asin_changes:
         color, title = "orange", f"⚠️ 每日检查完成 | {today_str}"
-        summary = f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n发现 **{len(asin_changes)}** 个 ASIN 有变化"
     else:
         color, title = "green", f"✅ 每日检查完成 | {today_str}"
-        summary = f"有效检查 **{valid_count}**/{total} 个 ASIN\n\n全部无异常"
+
+    summary = build_summary_card_text(
+        total, valid_count, failed_asins, changes_found, asins
+    )
 
     elements = [{"tag":"div","text":{"tag":"lark_md","content":summary}},
                 {"tag":"hr"},
