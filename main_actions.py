@@ -288,7 +288,7 @@ def compare(current, baseline):
     oc = _parse_num(baseline.get("review_count")); nc = _parse_num(current.get("review_count"))
     if oc is not None and nc is not None:
         d = nc - oc
-        if d <= -6 or d > 10: changes.append("review_count")
+        if d != 0: changes.append("review_count")
 
     return changes
 
@@ -411,6 +411,19 @@ def _card_text(value, limit=110):
     return text or "（空）"
 
 
+def _format_rating_reviews(data):
+    rating = str(data.get("rating", "") or "").strip()
+    review_raw = str(data.get("review_count", "") or "").strip()
+    review_number = _parse_num(review_raw)
+    if review_number is not None:
+        reviews = f"{int(review_number):,}"
+    else:
+        reviews = review_raw
+    if rating and reviews:
+        return f"{rating} ({reviews})"
+    return rating or (f"({reviews})" if reviews else "")
+
+
 def _split_bullets(value):
     text = str(value or "")
     if "||" in text:
@@ -420,7 +433,7 @@ def _split_bullets(value):
 
 def _format_card_change(field, old_value, new_value):
     """Describe exactly what changed without flooding the card."""
-    label = FIELD_LABELS.get(field, field)
+    label = "评分/评论数" if field == "rating_reviews" else FIELD_LABELS.get(field, field)
     if field == "bullet_points":
         old_items = _split_bullets(old_value)
         new_items = _split_bullets(new_value)
@@ -666,15 +679,28 @@ def main():
             if is_variant_switch(changed):
                 print("    Variant switch — skipped")
             elif changed:
-                for f in changed:
-                    detail = f"{f}: {baseline.get(f,'')} -> {current.get(f,'')}"
+                report_fields = list(changed)
+                if "rating" in report_fields or "review_count" in report_fields:
+                    report_fields = [f for f in report_fields if f not in ("rating", "review_count")]
+                    report_fields.append("rating_reviews")
+
+                for f in report_fields:
+                    if f == "rating_reviews":
+                        old_report_value = _format_rating_reviews(baseline)
+                        new_report_value = _format_rating_reviews(current)
+                        report_label = "评分/评论数"
+                    else:
+                        old_report_value = baseline.get(f, "")
+                        new_report_value = current.get(f, "")
+                        report_label = FIELD_LABELS.get(f, f)
+                    detail = f"{f}: {old_report_value} -> {new_report_value}"
                     print(f"    CHANGE: {detail[:100]}")
-                    changes_found.append({"asin":asin,"field":FIELD_LABELS.get(f,f),
-                        "old_value":str(baseline.get(f,"")).strip()[:200],
-                        "new_value":str(current.get(f,"")).strip()[:200],
+                    changes_found.append({"asin":asin,"field":report_label,
+                        "old_value":str(old_report_value).strip()[:200],
+                        "new_value":str(new_report_value).strip()[:200],
                         "field_key":f,
                         "card_detail":_format_card_change(
-                            f, baseline.get(f,""), current.get(f,"")
+                            f, old_report_value, new_report_value
                         )})
                     field_groups.setdefault(f,[]).append({"asin":asin,"detail":detail})
                     asin_changes.setdefault(asin,[]).append(detail)
