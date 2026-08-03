@@ -467,33 +467,77 @@ def _format_card_change(field, old_value, new_value):
 
 
 def build_summary_card_pages(total, valid_count, failed_asins, changes_found, asin_info):
-    """Return enough size-safe card pages to show every changed ASIN."""
-    changed_by_asin = {}
+    """Group all changes by field and paginate without omitting any ASIN."""
+    changed_by_field = {}
+    changed_asins = set()
     for row in changes_found:
-        changed_by_asin.setdefault(row["asin"], []).append(row)
+        field_key = row.get("field_key", "")
+        changed_by_field.setdefault(field_key, []).append(row)
+        changed_asins.add(row["asin"])
+
+    category_meta = {
+        "add_to_cart": ("🛒", "购物车状态变化"),
+        "sold_by": ("🏪", "Sold By变化"),
+        "price_raw": ("💰", "价格变化"),
+        "is_promo": ("🏷️", "促销状态变化"),
+        "rating_reviews": ("⭐", "评分/评论数变化"),
+        "sales_rank": ("📊", "销售排名变化"),
+        "title": ("📝", "标题变化"),
+        "bullet_points": ("📋", "五点描述变化"),
+        "variations": ("🔀", "变体关系变化"),
+        "breadcrumb": ("🗂️", "类目节点变化"),
+        "rating": ("⭐", "评分变化"),
+        "review_count": ("💬", "评论数变化"),
+    }
+    category_order = [
+        "add_to_cart", "sold_by", "price_raw", "is_promo",
+        "rating_reviews", "sales_rank", "title", "bullet_points",
+        "variations", "breadcrumb", "rating", "review_count",
+    ]
+    ordered_fields = [f for f in category_order if f in changed_by_field]
+    ordered_fields.extend(sorted(f for f in changed_by_field if f not in category_order))
 
     intro = [
         f"有效检查 **{valid_count}**/{total} 个 ASIN",
-        f"发现 **{len(changed_by_asin)}** 个 ASIN、**{len(changes_found)}** 项变化",
+        f"发现 **{len(changed_asins)}** 个 ASIN、**{len(changes_found)}** 项变化",
     ]
     pages = []
     max_chars = 18000
 
-    if changed_by_asin:
-        lines = intro + ["", "📌 **变化明细**"]
-        for asin in sorted(changed_by_asin):
-            info = asin_info.get(asin, {})
-            name = _card_text(info.get("name", ""), 40)
-            block = [f"\n**{asin}（{name}）**"]
-            for row in changed_by_asin[asin]:
-                block.append(row.get("card_detail") or _format_card_change(
-                    row.get("field_key", ""), row.get("old_value", ""), row.get("new_value", "")
-                ))
-            block_text = "\n".join(block)
-            if len("\n".join(lines)) + len(block_text) > max_chars and len(lines) > 2:
+    if changed_by_field:
+        lines = intro
+        for field_key in ordered_fields:
+            rows = sorted(changed_by_field[field_key], key=lambda row: row["asin"])
+            emoji, category_label = category_meta.get(
+                field_key, ("📌", f"{FIELD_LABELS.get(field_key, field_key)}变化")
+            )
+            category_header = f"\n{emoji} **{category_label}（{len(rows)}）**"
+            if len("\n".join(lines)) + len(category_header) > max_chars:
                 pages.append("\n".join(lines))
-                lines = ["📌 **变化明细（续）**"]
-            lines.append(block_text)
+                lines = []
+            lines.append(category_header)
+
+            for row in rows:
+                asin = row["asin"]
+                info = asin_info.get(asin, {})
+                name = _card_text(info.get("name") or "未填写品名", 40)
+                if field_key == "bullet_points":
+                    detail = row.get("card_detail") or _format_card_change(
+                        field_key, row.get("old_value", ""), row.get("new_value", "")
+                    )
+                    detail = re.sub(r"^\s*-\s*\*\*五点", "  - **", detail, flags=re.M)
+                    block_text = f"\n**{asin}（{name}）**\n{detail}"
+                else:
+                    block_text = (
+                        f"\n- **{asin}（{name}）**："
+                        f"{_card_text(row.get('old_value', ''), 100)}"
+                        f" → {_card_text(row.get('new_value', ''), 100)}"
+                    )
+
+                if len("\n".join(lines)) + len(block_text) > max_chars:
+                    pages.append("\n".join(lines))
+                    lines = [f"{emoji} **{category_label}（续）**"]
+                lines.append(block_text)
         pages.append("\n".join(lines))
     else:
         pages = ["\n".join(intro + ["", "全部无异常"])]
