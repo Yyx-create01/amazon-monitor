@@ -517,27 +517,52 @@ def build_summary_card_pages(total, valid_count, failed_asins, changes_found, as
                 lines = []
             lines.append(category_header)
 
+            # Within each change category, keep children of the same parent together.
+            parent_groups = {}
             for row in rows:
                 asin = row["asin"]
                 info = asin_info.get(asin, {})
-                name = _card_text(info.get("name") or "未填写品名", 40)
-                if field_key == "bullet_points":
-                    detail = row.get("card_detail") or _format_card_change(
-                        field_key, row.get("old_value", ""), row.get("new_value", "")
-                    )
-                    detail = re.sub(r"^\s*-\s*\*\*五点", "  - **", detail, flags=re.M)
-                    block_text = f"\n**{asin}（{name}）**\n{detail}"
-                else:
-                    block_text = (
-                        f"\n- **{asin}（{name}）**："
-                        f"{_card_text(row.get('old_value', ''), 100)}"
-                        f" → {_card_text(row.get('new_value', ''), 100)}"
-                    )
+                parent_name = str(info.get("parent_name") or "").strip()
+                # Missing parents remain unique instead of being merged together.
+                group_key = ("parent", parent_name) if parent_name else ("asin", asin)
+                parent_groups.setdefault(group_key, []).append(row)
 
-                if len("\n".join(lines)) + len(block_text) > max_chars:
-                    pages.append("\n".join(lines))
-                    lines = [f"{emoji} **{category_label}（续）**"]
-                lines.append(block_text)
+            sorted_groups = sorted(
+                parent_groups.items(),
+                key=lambda item: (0 if item[0][0] == "parent" else 1, item[0][1]),
+            )
+            for (group_type, group_name), group_rows in sorted_groups:
+                parent_header = ""
+                if group_type == "parent":
+                    parent_header = f"\n**父体：{_card_text(group_name, 60)}**"
+                    if len("\n".join(lines)) + len(parent_header) > max_chars:
+                        pages.append("\n".join(lines))
+                        lines = [f"{emoji} **{category_label}（续）**"]
+                    lines.append(parent_header)
+
+                for row in sorted(group_rows, key=lambda item: item["asin"]):
+                    asin = row["asin"]
+                    info = asin_info.get(asin, {})
+                    name = _card_text(info.get("name") or "未填写品名", 40)
+                    if field_key == "bullet_points":
+                        detail = row.get("card_detail") or _format_card_change(
+                            field_key, row.get("old_value", ""), row.get("new_value", "")
+                        )
+                        detail = re.sub(r"^\s*-\s*\*\*五点", "    · **", detail, flags=re.M)
+                        block_text = f"\n  - **{asin}（{name}）**\n{detail}"
+                    else:
+                        block_text = (
+                            f"\n  - **{asin}（{name}）**："
+                            f"{_card_text(row.get('old_value', ''), 100)}"
+                            f" → {_card_text(row.get('new_value', ''), 100)}"
+                        )
+
+                    if len("\n".join(lines)) + len(block_text) > max_chars:
+                        pages.append("\n".join(lines))
+                        lines = [f"{emoji} **{category_label}（续）**"]
+                        if group_type == "parent":
+                            lines.append(f"\n**父体：{_card_text(group_name, 60)}（续）**")
+                    lines.append(block_text)
         pages.append("\n".join(lines))
     else:
         pages = ["\n".join(intro + ["", "全部无异常"])]
