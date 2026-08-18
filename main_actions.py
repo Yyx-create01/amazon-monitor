@@ -69,8 +69,22 @@ def load_baseline(conn, asin):
     return dict(zip(cols, row))
 
 def save_baseline(conn, data):
+    existing = load_baseline(conn, data["asin"])
+    # A partially rendered Amazon page must never erase previously valid data.
+    preserve_if_empty = {
+        "title", "price_raw", "bullet_points", "sold_by", "breadcrumb",
+        "variations", "rating", "review_count", "sales_rank",
+    }
     fields = [k for k in data if k != "asin"]
-    values = [data[f] for f in fields] + [data["asin"]]
+    values = []
+    for field in fields:
+        value = data[field]
+        if (field in preserve_if_empty and existing
+                and not str(value or "").strip()
+                and str(existing.get(field, "") or "").strip()):
+            value = existing[field]
+        values.append(value)
+    values.append(data["asin"])
     conn.execute(
         f"UPDATE baseline SET {', '.join(f'{f}=?' for f in fields)} WHERE asin=?",
         values)
@@ -108,20 +122,33 @@ def fetch_page(asin, session):
         try:
             # Clear challenge/session cookies before switching strategy.
             session.cookies.clear()
-            resp = session.get(url, headers=headers, timeout=25, allow_redirects=True)
+            resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "lxml")
                 if soup.select_one("form[action='/errors/validateCaptcha']"):
                     print(f"    attempt {attempt+1}: CAPTCHA")
-                    time.sleep(4 * (attempt + 1))
+                    time.sleep(2 * (attempt + 1))
                     continue
                 redirected = asin not in resp.url
-                return soup, redirected
+                has_title = bool(soup.select_one("#productTitle") or soup.select_one("#title"))
+                page_text = soup.get_text(" ", strip=True).lower()
+                has_oos_signal = any(x in page_text for x in (
+                    "currently unavailable", "temporarily out of stock",
+                    "out of stock", "no longer available", "discontinued",
+                ))
+                if has_title or (redirected and has_oos_signal):
+                    return soup, redirected
+                # Amazon often returns HTTP 200 for a challenge/empty shell.
+                # Continue through the alternate URLs instead of starting the
+                # multi-minute main-loop cooldown.
+                print(f"    attempt {attempt+1}: empty/challenge page")
+                time.sleep(2)
+                continue
             print(f"    attempt {attempt+1}: HTTP {resp.status_code}")
-            time.sleep(4 * (attempt + 1))
+            time.sleep(2 * (attempt + 1))
         except requests.RequestException as e:
             print(f"    attempt {attempt+1}: {type(e).__name__}")
-            time.sleep(3 * (attempt + 1))
+            time.sleep(2 * (attempt + 1))
             continue
     return None, False
 
@@ -191,8 +218,9 @@ def parse_product(soup):
         el = soup.select_one(sel)
         if el:
             raw = el.get_text(" ", strip=True)
-            if raw and not any(p in raw.lower() for p in ["visit the store", "visit the brand store"]):
-                result["sold_by"] = raw
+            seller = _extract_seller_name(raw)
+            if seller:
+                result["sold_by"] = seller
                 break
 
     # Breadcrumb
@@ -303,9 +331,33 @@ def _bullets_similar(old, new, threshold=0.5):
 def is_variant_switch(changed):
     return "title" in set(changed) and ("price_raw" in set(changed) or "bullet_points" in set(changed))
 
-def _normalize_seller(val):
+def _extract_seller_name(val):
+    """Extract the actual Buy Box seller and reject Amazon UI placeholders."""
     if not val: return ""
-    return normalize_text(re.sub(r"\s*\([^)]*\)\s*", " ", str(val)))
+    text = re.sub(r"\s+", " ", str(val)).strip()
+    lower = text.lower()
+    generic = (
+        "learn more about the seller", "seller profile", "visit the store",
+        "visit the brand store", "see more", "details",
+    )
+    if any(x in lower for x in generic):
+        return ""
+
+    # Amazon Resale/Warehouse is a condition-specific fallback offer which
+    # appears intermittently on alternate page variants; it is not the stable
+    # primary seller signal this monitor is intended to track.
+    if "amazon resale" in lower or "amazon warehouse" in lower:
+        return ""
+
+    match = re.search(r"\bsold\s+by\s+(.+?)(?=\s+(?:and\s+)?fulfilled\s+by|\s+ships?\s+from|\s+returns?|\s+payment|$)", text, re.I)
+    if match:
+        text = match.group(1).strip(" .:|-―")
+    text = re.sub(r"\s*\([^)]*\)\s*", " ", text).strip(" .:|-―")
+    return text
+
+
+def _normalize_seller(val):
+    return normalize_text(_extract_seller_name(val))
 
 def _normalize_price(val):
     if not val: return None
@@ -709,6 +761,15 @@ def main():
     failed_asins = set()
     valid_count = 0
 
+    def pause_before_next(index):
+        """Keep request pacing consistent even when the current ASIN fails."""
+        if index >= total:
+            return
+        time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+        if INTERNAL_BATCH_SIZE > 0 and index % INTERNAL_BATCH_SIZE == 0:
+            print(f"  [BATCH PAUSE] {INTERNAL_BATCH_PAUSE}s")
+            time.sleep(INTERNAL_BATCH_PAUSE)
+
     for i, (asin, _) in enumerate(shuffled, 1):
         print(f"  [{i}/{total}] {asin}...")
         soup, redirected = fetch_page(asin, session)
@@ -716,6 +777,14 @@ def main():
         if soup is None:
             print("    SKIP: fetch failed")
             failed_asins.add(asin)
+            empty_streak += 1
+            if empty_streak >= 8:
+                cooldown_count += 1
+                cd = 45
+                print(f"  [COOLDOWN] {cd}s (#{cooldown_count})")
+                time.sleep(cd)
+                empty_streak = 0
+            pause_before_next(i)
             continue
 
         if redirected and not (soup.select_one("#productTitle") or soup.select_one("#title")):
@@ -730,10 +799,11 @@ def main():
             empty_streak += 1
             if empty_streak >= 8:
                 cooldown_count += 1
-                cd = min(300 * cooldown_count, 1800)
+                cd = 45
                 print(f"  [COOLDOWN] {cd}s (#{cooldown_count})")
                 time.sleep(cd)
                 empty_streak = 0
+            pause_before_next(i)
             continue
         else:
             empty_streak = 0
@@ -776,11 +846,7 @@ def main():
             save_baseline(conn, {**current, "asin":asin, "updated_at":datetime.now(BJT).isoformat()})
             if not changed: print("    No changes")
 
-        if i < total:
-            time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-            if INTERNAL_BATCH_SIZE > 0 and i % INTERNAL_BATCH_SIZE == 0:
-                print(f"  [BATCH PAUSE] {INTERNAL_BATCH_PAUSE}s")
-                time.sleep(INTERNAL_BATCH_PAUSE)
+        pause_before_next(i)
 
     today_str = datetime.now(BJT).strftime("%Y-%m-%d")
     write_results(client, changes_found, asins)
@@ -788,8 +854,11 @@ def main():
 
     sheet_url = f"https://{FEISHU_TENANT}.feishu.cn/base/{FEISHU_APP_TOKEN}?table={FEISHU_RESULT_TABLE_ID}"
 
-    if failed_asins:
+    severe_failure_count = max(10, int(total * 0.10))
+    if len(failed_asins) >= severe_failure_count:
         color, title = "red", f"🚫 检查存在失败 | {today_str}"
+    elif failed_asins:
+        color, title = "orange", f"⚠️ 检查完成（少量抓取失败）| {today_str}"
     elif asin_changes:
         color, title = "orange", f"⚠️ 每日检查完成 | {today_str}"
     else:
