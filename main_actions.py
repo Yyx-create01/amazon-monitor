@@ -68,6 +68,14 @@ def load_baseline(conn, asin):
     cols = [d[1] for d in conn.execute("PRAGMA table_info(baseline)")]
     return dict(zip(cols, row))
 
+def _bullet_items(value):
+    return [x.strip() for x in str(value or "").split("||") if x.strip()]
+
+def _bullets_complete(value):
+    """Reject partial Amazon renders that expose only one or two bullets."""
+    items = _bullet_items(value)
+    return len(items) >= 4 and all(len(normalize_text(item)) >= 20 for item in items)
+
 def save_baseline(conn, data):
     existing = load_baseline(conn, data["asin"])
     # A partially rendered Amazon page must never erase previously valid data.
@@ -82,6 +90,10 @@ def save_baseline(conn, data):
         if (field in preserve_if_empty and existing
                 and not str(value or "").strip()
                 and str(existing.get(field, "") or "").strip()):
+            value = existing[field]
+        if (field == "bullet_points" and existing
+                and not _bullets_complete(value)
+                and _bullets_complete(existing.get(field, ""))):
             value = existing[field]
         values.append(value)
     values.append(data["asin"])
@@ -305,6 +317,13 @@ def compare(current, baseline):
         ov = normalize_text(baseline.get(f))
         nv = normalize_text(current.get(f))
         if not nv: continue
+        if f == "sales_rank" and not ov:
+            # Filling a previously missing BSR is baseline healing, not a change.
+            continue
+        if f == "bullet_points" and not (
+                _bullets_complete(baseline.get(f))
+                and _bullets_complete(current.get(f))):
+            continue
         if ov == nv: continue
         if f == "bullet_points" and _bullets_similar(ov, nv): continue
         changes.append(f)
@@ -321,9 +340,12 @@ def compare(current, baseline):
     return changes
 
 def _bullets_similar(old, new, threshold=0.5):
-    def split(t):
-        return {i.strip().rstrip(";.,").strip() for i in t.replace("||","|").split("|") if len(i.strip()) >= 5}
-    oi = split(old); ni = split(new)
+    def normalized_items(t):
+        return {
+            normalize_text(i).rstrip(";.,").strip()
+            for i in _bullet_items(t) if len(normalize_text(i)) >= 5
+        }
+    oi = normalized_items(old); ni = normalized_items(new)
     if not oi or not ni: return False
     all_items = oi | ni
     return len(oi & ni) / len(all_items) >= threshold if all_items else False
@@ -420,12 +442,68 @@ def read_asin_list(client):
                 asin_map[val] = {
                     "name": str(f.get("品名","")).strip(),
                     "parent_name": str(f.get("父体名","")).strip(),
+                    "parent_asin": str(
+                        f.get("父体ASIN") or f.get("父ASIN")
+                        or f.get("Parent ASIN") or ""
+                    ).strip(),
                     "product_line": str(f.get("产品线","")).strip(),
                 }
         if not data.get("data",{}).get("has_more"): break
         page_token = data.get("data",{}).get("page_token","")
         if not page_token: break
     return asin_map
+
+
+def select_daily_half(asin_map, today=None):
+    """Split by parent family so siblings are checked on the same day."""
+    today = today or datetime.now(BJT).date()
+    families = {}
+    for asin, info in sorted(asin_map.items()):
+        family_key = (
+            str(info.get("parent_asin") or "").strip()
+            or str(info.get("parent_name") or "").strip()
+            or asin
+        )
+        families.setdefault(family_key, []).append((asin, info))
+
+    halves = [[], []]
+    # Put larger families first, always into the currently smaller half.
+    for _, family_items in sorted(
+            families.items(), key=lambda item: (-len(item[1]), item[0])):
+        target = 0 if len(halves[0]) <= len(halves[1]) else 1
+        halves[target].extend(family_items)
+
+    selected_index = today.toordinal() % 2
+    return halves[selected_index], selected_index, (len(halves[0]), len(halves[1]))
+
+
+def collapse_parent_sales_rank_changes(rows, asin_info):
+    """BSR belongs to the parent listing; report it once per parent family."""
+    other_rows = []
+    rank_groups = {}
+    for row in rows:
+        if row.get("field_key") != "sales_rank":
+            other_rows.append(row)
+            continue
+        asin = row["asin"]
+        info = asin_info.get(asin, {})
+        parent_asin = str(info.get("parent_asin") or "").strip()
+        parent_name = str(info.get("parent_name") or "").strip()
+        group_key = parent_asin or parent_name or asin
+        rank_groups.setdefault(group_key, []).append((row, parent_asin, parent_name))
+
+    collapsed = []
+    for _, candidates in sorted(rank_groups.items()):
+        chosen = next(
+            (item for item in candidates if item[1] and item[0]["asin"] == item[1]),
+            candidates[0],
+        )
+        row, parent_asin, parent_name = chosen
+        row = dict(row)
+        row["report_parent_asin"] = parent_asin
+        row["report_parent_name"] = parent_name
+        collapsed.append(row)
+    return other_rows + collapsed
 
 def write_results(client, rows, asin_info=None):
     if not rows: return
@@ -568,6 +646,34 @@ def build_summary_card_pages(total, valid_count, failed_asins, changes_found, as
                 pages.append("\n".join(lines))
                 lines = []
             lines.append(category_header)
+
+            if field_key == "sales_rank":
+                # BSR is shared by the parent listing. Never expand all child
+                # ASINs under the same parent in the notification.
+                for row in rows:
+                    asin = row["asin"]
+                    info = asin_info.get(asin, {})
+                    parent_asin = str(row.get("report_parent_asin") or "").strip()
+                    parent_name = str(row.get("report_parent_name") or "").strip()
+                    if parent_asin and parent_name:
+                        parent_label = f"{parent_asin}（{parent_name}）"
+                    elif parent_asin:
+                        parent_label = parent_asin
+                    elif parent_name:
+                        parent_label = parent_name
+                    else:
+                        name = _card_text(info.get("name") or "未填写品名", 40)
+                        parent_label = f"{asin}（{name}）"
+                    block_text = (
+                        f"\n  - **父体：{_card_text(parent_label, 80)}**："
+                        f"{_card_text(row.get('old_value', ''), 100)}"
+                        f" → {_card_text(row.get('new_value', ''), 100)}"
+                    )
+                    if len("\n".join(lines)) + len(block_text) > max_chars:
+                        pages.append("\n".join(lines))
+                        lines = [f"{emoji} **{category_label}（续）**"]
+                    lines.append(block_text)
+                continue
 
             # Within each change category, keep children of the same parent together.
             parent_groups = {}
@@ -742,16 +848,27 @@ def main():
     if args.batch and "/" in args.batch:
         p = args.batch.split("/"); batch_num = int(p[0]); batch_total = int(p[1])
 
-    shuffled = list(asins.items()); random.shuffle(shuffled)
+    all_items = list(asins.items())
+    shuffled = all_items
     if batch_num and batch_total:
+        shuffled = sorted(all_items)
         cs = (len(shuffled) + batch_total - 1) // batch_total
         s = (batch_num - 1) * cs; e = min(batch_num * cs, len(shuffled))
         shuffled = shuffled[s:e]
         print(f"  Batch {batch_num}/{batch_total}: {len(shuffled)} ASINs")
-
-    if args.limit > 0:
+    elif args.limit > 0:
+        shuffled = list(all_items)
+        random.shuffle(shuffled)
         shuffled = shuffled[:args.limit]
         print(f"  Limit mode: {len(shuffled)} ASINs")
+    else:
+        shuffled, half_index, half_sizes = select_daily_half(asins)
+        print(
+            f"  Daily half {half_index + 1}/2: {len(shuffled)} ASINs "
+            f"(halves={half_sizes[0]}/{half_sizes[1]})"
+        )
+
+    random.shuffle(shuffled)
 
     total = len(shuffled)
     changes_found = []
@@ -849,6 +966,7 @@ def main():
         pause_before_next(i)
 
     today_str = datetime.now(BJT).strftime("%Y-%m-%d")
+    changes_found = collapse_parent_sales_rank_changes(changes_found, asins)
     write_results(client, changes_found, asins)
     print(f"  Wrote {len(changes_found)} changes")
 
