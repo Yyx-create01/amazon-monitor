@@ -95,6 +95,10 @@ def save_baseline(conn, data):
                 and not _bullets_complete(value)
                 and _bullets_complete(existing.get(field, ""))):
             value = existing[field]
+        if field == "title" and existing and str(value or "").strip():
+            value = _merge_title_with_existing_highlights(
+                value, existing.get(field, "")
+            )
         values.append(value)
     values.append(data["asin"])
     conn.execute(
@@ -114,6 +118,19 @@ def normalize_text(val):
     if val is None: return ""
     text = unicodedata.normalize("NFKC", str(val))
     return re.sub(r"\s+", " ", text).lower().strip()
+
+def _title_only(value):
+    """The source sheet stores `title | highlights`; Amazon exposes title only."""
+    return re.split(r"[|｜]", str(value or ""), maxsplit=1)[0].strip()
+
+def _merge_title_with_existing_highlights(current_title, existing_title):
+    """Update the live title while retaining source-sheet highlights after `|`."""
+    current = _title_only(current_title)
+    existing = str(existing_title or "").strip()
+    parts = re.split(r"[|｜]", existing, maxsplit=1)
+    if current and len(parts) == 2 and parts[1].strip():
+        return f"{current} | {parts[1].strip()}"
+    return current
 
 # ── Scraper ─────────────────────────────────────────────────────────
 def fetch_page(asin, session):
@@ -314,8 +331,12 @@ def compare(current, baseline):
                 changes.append("price_raw")
 
     for f in text_fields:
-        ov = normalize_text(baseline.get(f))
-        nv = normalize_text(current.get(f))
+        if f == "title":
+            ov = normalize_text(_title_only(baseline.get(f)))
+            nv = normalize_text(_title_only(current.get(f)))
+        else:
+            ov = normalize_text(baseline.get(f))
+            nv = normalize_text(current.get(f))
         if not nv: continue
         if f == "sales_rank" and not ov:
             # Filling a previously missing BSR is baseline healing, not a change.
@@ -586,8 +607,8 @@ def _format_card_change(field, old_value, new_value):
 
     if field == "title":
         return (
-            f"  - **{label}**：{_card_text(old_value, 100)}"
-            f" → {_card_text(new_value, 100)}"
+            f"  - **{label}**：{_card_text(_title_only(old_value), 100)}"
+            f" → {_card_text(_title_only(new_value), 100)}"
         )
 
     return (
@@ -945,6 +966,10 @@ def main():
                         old_report_value = _format_rating_reviews(baseline)
                         new_report_value = _format_rating_reviews(current)
                         report_label = "评分/评论数"
+                    elif f == "title":
+                        old_report_value = _title_only(baseline.get(f, ""))
+                        new_report_value = _title_only(current.get(f, ""))
+                        report_label = FIELD_LABELS.get(f, f)
                     else:
                         old_report_value = baseline.get(f, "")
                         new_report_value = current.get(f, "")
