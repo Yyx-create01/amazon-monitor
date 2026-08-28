@@ -475,8 +475,10 @@ def read_asin_list(client):
     return asin_map
 
 
-def select_daily_half(asin_map, today=None):
-    """Split by parent family so siblings are checked on the same day."""
+def select_daily_partition(asin_map, today=None, partition_count=4):
+    """Balance parent families across rotating daily partitions."""
+    if partition_count < 1:
+        raise ValueError("partition_count must be positive")
     today = today or datetime.now(BJT).date()
     families = {}
     for asin, info in sorted(asin_map.items()):
@@ -487,15 +489,18 @@ def select_daily_half(asin_map, today=None):
         )
         families.setdefault(family_key, []).append((asin, info))
 
-    halves = [[], []]
-    # Put larger families first, always into the currently smaller half.
+    partitions = [[] for _ in range(partition_count)]
+    # Put larger families first, always into the currently smallest partition.
+    # This keeps siblings together while making the ASIN counts as even as
+    # possible (568 ASINs should be close to 142 per day).
     for _, family_items in sorted(
             families.items(), key=lambda item: (-len(item[1]), item[0])):
-        target = 0 if len(halves[0]) <= len(halves[1]) else 1
-        halves[target].extend(family_items)
+        target = min(range(partition_count), key=lambda i: (len(partitions[i]), i))
+        partitions[target].extend(family_items)
 
-    selected_index = today.toordinal() % 2
-    return halves[selected_index], selected_index, (len(halves[0]), len(halves[1]))
+    selected_index = today.toordinal() % partition_count
+    sizes = tuple(len(partition) for partition in partitions)
+    return partitions[selected_index], selected_index, sizes
 
 
 def collapse_parent_sales_rank_changes(rows, asin_info):
@@ -877,17 +882,16 @@ def main():
         s = (batch_num - 1) * cs; e = min(batch_num * cs, len(shuffled))
         shuffled = shuffled[s:e]
         print(f"  Batch {batch_num}/{batch_total}: {len(shuffled)} ASINs")
-    elif args.limit > 0:
-        shuffled = list(all_items)
-        random.shuffle(shuffled)
-        shuffled = shuffled[:args.limit]
-        print(f"  Limit mode: {len(shuffled)} ASINs")
     else:
-        shuffled, half_index, half_sizes = select_daily_half(asins)
+        shuffled, partition_index, partition_sizes = select_daily_partition(asins)
         print(
-            f"  Daily half {half_index + 1}/2: {len(shuffled)} ASINs "
-            f"(halves={half_sizes[0]}/{half_sizes[1]})"
+            f"  Daily partition {partition_index + 1}/4: {len(shuffled)} ASINs "
+            f"(partitions={'/'.join(str(size) for size in partition_sizes)})"
         )
+        if args.limit > 0:
+            random.shuffle(shuffled)
+            shuffled = shuffled[:args.limit]
+            print(f"  Limit mode: {len(shuffled)} ASINs")
 
     random.shuffle(shuffled)
 
