@@ -614,6 +614,58 @@ def _split_bullets(value):
     return [text.strip()] if text.strip() else []
 
 
+def _parse_sales_rank_entries(value):
+    """Return ordered category/rank pairs from normalized Amazon BSR text."""
+    entries = []
+    for segment in re.split(r"\s*\|\s*", str(value or "")):
+        segment = segment.strip()
+        if not segment:
+            continue
+        match = re.match(r"#([\d,]+)\s+in\s+(.+)$", segment, re.I)
+        if not match:
+            continue
+        rank = f"#{match.group(1)}"
+        category = re.sub(r"\s+", " ", match.group(2)).strip()
+        entries.append((normalize_text(category), category, rank))
+    return entries
+
+
+def _format_sales_rank_change(old_value, new_value):
+    """Format each changed BSR category separately for quick scanning."""
+    old_entries = _parse_sales_rank_entries(old_value)
+    new_entries = _parse_sales_rank_entries(new_value)
+    if not old_entries or not new_entries:
+        return (
+            f"{_card_text(old_value, 100)}"
+            f" → {_card_text(new_value, 100)}"
+        )
+
+    old_map = {key: (category, rank) for key, category, rank in old_entries}
+    new_map = {key: (category, rank) for key, category, rank in new_entries}
+    ordered_keys = []
+    for key, _, _ in old_entries + new_entries:
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+
+    changes = []
+    for key in ordered_keys:
+        old_entry = old_map.get(key)
+        new_entry = new_map.get(key)
+        old_rank = old_entry[1] if old_entry else "（无）"
+        new_rank = new_entry[1] if new_entry else "（无）"
+        if old_rank == new_rank:
+            continue
+        category = (new_entry or old_entry)[0]
+        changes.append(f"{category} {old_rank} → {new_rank}")
+
+    if changes:
+        return "，".join(changes)
+    return (
+        f"{_card_text(old_value, 100)}"
+        f" → {_card_text(new_value, 100)}"
+    )
+
+
 def _format_card_change(field, old_value, new_value):
     """Describe exactly what changed without flooding the card."""
     label = "评分/评论数" if field == "rating_reviews" else FIELD_LABELS.get(field, field)
@@ -708,19 +760,16 @@ def build_summary_card_pages(total, valid_count, failed_asins, changes_found, as
                     info = asin_info.get(asin, {})
                     parent_asin = str(row.get("report_parent_asin") or "").strip()
                     parent_name = str(row.get("report_parent_name") or "").strip()
-                    if parent_asin and parent_name:
-                        parent_label = f"{parent_asin}（{parent_name}）"
+                    if parent_name:
+                        parent_label = parent_name
                     elif parent_asin:
                         parent_label = parent_asin
-                    elif parent_name:
-                        parent_label = parent_name
                     else:
                         name = _card_text(info.get("name") or "未填写品名", 40)
                         parent_label = f"{asin}（{name}）"
                     block_text = (
                         f"\n  - **父体：{_card_text(parent_label, 80)}**："
-                        f"{_card_text(row.get('old_value', ''), 100)}"
-                        f" → {_card_text(row.get('new_value', ''), 100)}"
+                        f"{_format_sales_rank_change(row.get('old_value', ''), row.get('new_value', ''))}"
                     )
                     if len("\n".join(lines)) + len(block_text) > max_chars:
                         pages.append("\n".join(lines))
