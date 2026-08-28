@@ -450,6 +450,10 @@ class FeishuClient:
 def read_asin_list(client):
     base = f"/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_SOURCE_TABLE_ID}/records"
     asin_map = {}
+    source_record_count = 0
+    asin_row_count = 0
+    duplicate_asins = []
+    invalid_asins = []
     page_token = None
     while True:
         path = base + "?page_size=500"
@@ -457,9 +461,17 @@ def read_asin_list(client):
         data = client._req("GET", path)
         if not data: sys.exit(1)
         for rec in data.get("data",{}).get("items",[]):
+            source_record_count += 1
             f = rec.get("fields",{})
-            val = str(f.get("ASIN","")).strip()
-            if re.match(r"^B[A-Z0-9]{9}$", val):
+            raw_val = str(f.get("ASIN","") or "").strip()
+            if not raw_val:
+                continue
+            asin_row_count += 1
+            val = unicodedata.normalize("NFKC", raw_val).upper()
+            val = re.sub(r"[\s\u200b-\u200d\ufeff]", "", val)
+            if re.fullmatch(r"B[A-Z0-9]{9}", val):
+                if val in asin_map:
+                    duplicate_asins.append(val)
                 asin_map[val] = {
                     "name": str(f.get("品名","")).strip(),
                     "parent_name": str(f.get("父体名","")).strip(),
@@ -469,9 +481,24 @@ def read_asin_list(client):
                     ).strip(),
                     "product_line": str(f.get("产品线","")).strip(),
                 }
+            else:
+                invalid_asins.append(raw_val)
         if not data.get("data",{}).get("has_more"): break
         page_token = data.get("data",{}).get("page_token","")
         if not page_token: break
+    print(
+        f"  Source rows: {source_record_count}; ASIN rows: {asin_row_count}; "
+        f"unique valid ASINs: {len(asin_map)}"
+    )
+    if duplicate_asins:
+        print(
+            f"  [WARN] Duplicate ASIN rows ({len(duplicate_asins)}): "
+            + ", ".join(sorted(set(duplicate_asins)))
+        )
+    if invalid_asins:
+        preview = ", ".join(repr(value) for value in invalid_asins[:20])
+        suffix = " ..." if len(invalid_asins) > 20 else ""
+        print(f"  [WARN] Invalid ASIN rows ({len(invalid_asins)}): {preview}{suffix}")
     return asin_map
 
 
